@@ -1,1 +1,20 @@
-[]
+[
+  {
+    "userId": "c775dc78-ae50-479a-bdf4-e21fa02bac52",
+    "sessionId": "1756627403035",
+    "id": "2f8c27d2-5e5b-4172-a609-d43aa67c0757",
+    "createdAt": "2025-08-31T08:03:29.614Z"
+  },
+  {
+    "userId": "c775dc78-ae50-479a-bdf4-e21fa02bac52",
+    "sessionId": "1756627403035",
+    "id": "42f6da6f-28ce-478a-8f4d-22d103eb22eb",
+    "createdAt": "2025-08-31T08:05:09.409Z"
+  },
+  {
+    "userId": "c775dc78-ae50-479a-bdf4-e21fa02bac52",
+    "sessionId": "1756627509022",
+    "id": "fdf242c1-c2c4-4a91-94cc-715703e2033e",
+    "createdAt": "2025-08-31T08:05:15.610Z"
+  }
+]
