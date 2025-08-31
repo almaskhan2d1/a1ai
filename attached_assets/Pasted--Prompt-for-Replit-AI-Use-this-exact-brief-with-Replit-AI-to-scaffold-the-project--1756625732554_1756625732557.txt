@@ -1,0 +1,371 @@
+# 📌 Prompt for Replit AI
+
+Use this exact brief with Replit AI to scaffold the project.
+
+---
+
+**Title:** Build a minimal full‑stack Gemini AI web app (text + image analysis) with HTML/CSS/JS UI, Node.js proxy, and `.txt` file storage
+
+**Goal:**
+Create a lightweight AI web app "like ChatGPT (text + image analysis only)" using **Google Gemini free‑tier API**. The UI must be **HTML + CSS + vanilla JS only**. Use a **tiny Node.js/Express server** solely to (a) securely call the Gemini API (never expose API keys to the browser) and (b) save logs and simple user records as `.txt` files in the project root (no database). Keep everything simple and readable.
+
+**Pages to implement (static HTML files in `/public`)**
+
+1. `index.html` → Landing page (AI‑generated headline on each load/refresh) + theme picker
+2. `register.html` → Minimal AI‑only registration (local user file, no email)
+3. `login.html` → Minimal login (checks users file)
+4. `dashboard.html` → Shows quick stats (from logs), links to chat, theme control
+5. `chat.html` → Chat UI for text generation and image analysis (Gemini)
+
+**Saving & storage (NO database):**
+
+* Store **users** in `users.txt` in project root as newline‑delimited JSON objects.
+* Store **chat logs** as `.txt` files under `logs/` with pattern: `logs/<username>_<YYYYMMDD-HHMMSS>.txt`.
+* Also keep a rolling `logs/chat_index.txt` to list all logs created.
+* All file operations must sanitize input and never allow path traversal.
+
+**Tech constraints & notes:**
+
+* UI: **HTML, CSS, vanilla JS only** (no frameworks). Use modular JS files under `/public/js`.
+* Multi‑theme support (like ChatGPT) with 4+ preset colorways using CSS variables. Persist choice to `localStorage`.
+* **Gemini**: Support **text generation** and **image analysis** (user uploads image). Use the **server** to call Gemini API and return results to the browser. Provide helpful default system prompts and short safety configs.
+* Do **not** include any database. Only `.txt` files in root / `logs`.
+* Keep it clean and production‑ish: accessible, responsive, simple components.
+
+**File structure**
+
+```
+/
+├─ server.js
+├─ package.json
+├─ .env              # GEMINI_API_KEY=...
+├─ users.txt         # created if missing
+├─ logs/             # mkdir if missing
+│  ├─ chat_index.txt # created if missing
+│  └─ ... per‑session log files
+└─ public/
+   ├─ index.html
+   ├─ register.html
+   ├─ login.html
+   ├─ dashboard.html
+   ├─ chat.html
+   ├─ css/
+   │  └─ styles.css
+   └─ js/
+      ├─ util.js
+      ├─ auth.js
+      ├─ theme.js
+      ├─ landing.js
+      └─ chat.js
+```
+
+---
+
+## 1) `package.json`
+
+```json
+{
+  "name": "gemini-text-image-ai",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "morgan": "^1.10.0",
+    "multer": "^1.4.5-lts.1",
+    "node-fetch": "^3.3.2"
+  }
+}
+```
+
+## 2) `server.js`
+
+```js
+import express from 'express';
+import morgan from 'morgan';
+import dotenv from 'dotenv';
+import fs from 'fs';
+import path from 'path';
+import crypto from 'crypto';
+import fetch from 'node-fetch';
+import multer from 'multer';
+
+dotenv.config();
+const app = express();
+const PORT = process.env.PORT || 3000;
+const GEMINI_KEY = process.env.GEMINI_API_KEY || '';
+const GEMINI_TEXT_MODEL = 'gemini-1.5-flash-latest';
+
+const __root = process.cwd();
+const LOG_DIR = path.join(__root, 'logs');
+const USERS_FILE = path.join(__root, 'users.txt');
+const INDEX_FILE = path.join(LOG_DIR, 'chat_index.txt');
+
+// Ensure files/dirs
+if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR);
+if (!fs.existsSync(USERS_FILE)) fs.writeFileSync(USERS_FILE, '', 'utf8');
+if (!fs.existsSync(INDEX_FILE)) fs.writeFileSync(INDEX_FILE, '', 'utf8');
+
+app.use(morgan('dev'));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: false }));
+app.use(express.static('public'));
+
+// Helpers
+const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
+const nowStamp = () => new Date().toISOString().replace(/[:T]/g, '-').split('.')[0];
+const sanitize = (s) => s.replace(/[^a-zA-Z0-9-_\.]/g, '');
+
+// AUTH (super simple; file-based; NOT for production)
+app.post('/api/register', (req, res) => {
+  try {
+    const { username, password } = req.body || {};
+    if (!username || !password) return res.status(400).json({ error: 'username & password required' });
+    const u = sanitize(username.toLowerCase());
+    const passHash = sha256(password);
+    const lines = fs.readFileSync(USERS_FILE, 'utf8').split('\n').filter(Boolean);
+    if (lines.find((ln) => JSON.parse(ln).username === u)) {
+      return res.status(409).json({ error: 'username exists' });
+    }
+    fs.appendFileSync(USERS_FILE, JSON.stringify({ username: u, passHash }) + '\n');
+    res.json({ ok: true, username: u });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/login', (req, res) => {
+  try {
+    const { username, password } = req.body || {};
+    const u = sanitize((username || '').toLowerCase());
+    const passHash = sha256(password || '');
+    const lines = fs.readFileSync(USERS_FILE, 'utf8').split('\n').filter(Boolean);
+    const match = lines.map((ln) => JSON.parse(ln)).find((x) => x.username === u && x.passHash === passHash);
+    if (!match) return res.status(401).json({ error: 'invalid credentials' });
+    // Return a very simple pseudo token (NOT secure) for front-end localStorage
+    const token = sha256(u + ':' + Date.now());
+    res.json({ ok: true, username: u, token });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// LOGGING
+app.post('/api/save-log', (req, res) => {
+  try {
+    const { username, sessionId, line } = req.body || {};
+    if (!username || !sessionId) return res.status(400).json({ error: 'missing username/sessionId' });
+    const user = sanitize(username);
+    const sess = sanitize(sessionId);
+    const file = path.join(LOG_DIR, `${user}_${sess}.txt`);
+    fs.appendFileSync(file, (line || '') + '\n');
+    fs.appendFileSync(INDEX_FILE, `${user}\t${sess}\t${new Date().toISOString()}\n`);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/list-logs', (req, res) => {
+  const { username } = req.query;
+  const user = sanitize(username || '');
+  const files = fs.readdirSync(LOG_DIR).filter(f => f.startsWith(user + '_') && f.endsWith('.txt'));
+  res.json({ files });
+});
+
+app.get('/api/read-log', (req, res) => {
+  const { file } = req.query;
+  const safe = sanitize(file || '');
+  const p = path.join(LOG_DIR, safe);
+  if (!p.startsWith(LOG_DIR)) return res.status(400).json({ error: 'bad path' });
+  if (!fs.existsSync(p)) return res.status(404).json({ error: 'not found' });
+  res.type('text/plain').send(fs.readFileSync(p, 'utf8'));
+});
+
+// GEMINI proxy (text + image). Use one endpoint, detect if image included.
+const GEMINI_URL = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`;
+
+// image upload middleware (for image analysis via multipart)
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 6 * 1024 * 1024 } });
+
+app.post('/api/gemini', upload.single('image'), async (req, res) => {
+  try {
+    if (!GEMINI_KEY) return res.status(500).json({ error: 'Server missing GEMINI_API_KEY' });
+    const { prompt, system } = req.body || {};
+    const parts = [];
+    if (system) parts.push({ text: system.slice(0, 4000) });
+    if (prompt) parts.push({ text: prompt.slice(0, 20000) });
+
+    if (req.file) {
+      const base64 = req.file.buffer.toString('base64');
+      parts.push({ inlineData: { mimeType: req.file.mimetype || 'image/png', data: base64 } });
+    }
+
+    const body = {
+      contents: [{ role: 'user', parts }],
+      generationConfig: { temperature: 0.7, maxOutputTokens: 1024 },
+      safetySettings: [
+        { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+        { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+        { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+        { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' }
+      ]
+    };
+
+    const resp = await fetch(GEMINI_URL(GEMINI_TEXT_MODEL), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await resp.json();
+    if (!resp.ok) return res.status(500).json({ error: 'gemini_error', detail: data });
+
+    const text = (data?.candidates?.[0]?.content?.parts?.[0]?.text) || '';
+    res.json({ ok: true, text, raw: data });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.listen(PORT, () => console.log(`Server on http://localhost:${PORT}`));
+```
+
+## 3) `/public/css/styles.css`
+
+```css
+:root { --bg: #0b0b0e; --panel: #121219; --text: #e6e6ec; --muted: #9aa0a6; --accent: #7c5cff; }
+/* themes */
+[data-theme="neon"] { --bg:#0a0b10; --panel:#121225; --text:#e9e9ff; --muted:#9aa0ff; --accent:#7c5cff; }
+[data-theme="teal"] { --bg:#071a19; --panel:#0b2422; --text:#e3fbf9; --muted:#9dd4cf; --accent:#2dd4bf; }
+[data-theme="rose"] { --bg:#1a0b11; --panel:#24111a; --text:#ffeaf1; --muted:#f8b4c6; --accent:#f472b6; }
+[data-theme="amber"] { --bg:#1a1307; --panel:#241a0b; --text:#fff7e6; --muted:#fcd58a; --accent:#f59e0b; }
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin:0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu; }
+.container { max-width: 980px; margin: 0 auto; padding: 24px; }
+.card { background: var(--panel); border-radius: 16px; padding: 20px; box-shadow: 0 10px 30px rgba(0,0,0,.35); }
+.btn { display:inline-flex; gap:8px; align-items:center; padding:10px 16px; background:var(--accent); color:#000; border:none; border-radius:12px; cursor:pointer; font-weight:700; }
+.btn:disabled { opacity:.6; cursor:not-allowed; }
+.input, .select, .file { width:100%; padding:12px 14px; border-radius:10px; border:1px solid rgba(255,255,255,.08); background:#0000001f; color:var(--text); }
+.row { display:flex; gap:16px; flex-wrap:wrap; }
+.col { flex:1 1 320px; }
+.nav { display:flex; justify-content:space-between; align-items:center; margin-bottom:24px; }
+.nav a { color: var(--text); text-decoration:none; margin: 0 10px; }
+.muted { color: var(--muted); }
+pre { white-space: pre-wrap; word-wrap: break-word; }
+header.hero { padding: 80px 0 40px; text-align:center; }
+.hero h1 { font-size: 40px; margin: 0 0 12px; }
+.hero p { color: var(--muted); margin: 0 0 24px; }
+.theme-picker { display:flex; gap:10px; justify-content:center; margin-top:16px; }
+.theme-picker button { border:1px solid rgba(255,255,255,.1); background:transparent; color:var(--text); padding:8px 12px; border-radius:999px; cursor:pointer; }
+.chat-box { display:flex; flex-direction:column; gap:12px; }
+.message { background:#00000022; border: 1px solid rgba(255,255,255,.06); padding:12px; border-radius:12px; }
+.message.me { background:#2f2a0016; }
+.message.ai { background:#002a2f16; }
+footer { margin-top:40px; text-align:center; color: var(--muted); }
+```
+
+## 4) `/public/js/util.js`
+
+```js
+export const api = async (url, opts={}) => {
+  const r = await fetch(url, { headers: { 'Content-Type':'application/json' }, credentials:'same-origin', ...opts });
+  if (!r.ok) throw new Error((await r.text())||'err');
+  return r.json();
+};
+export const sessionId = () => localStorage.getItem('sessionId') || (()=>{const v=Date.now().toString(36); localStorage.setItem('sessionId', v); return v;})();
+export const setUser = (u)=>localStorage.setItem('user', u);
+export const getUser = ()=>localStorage.getItem('user');
+export const token = ()=>localStorage.getItem('token');
+export const guard = ()=>{ if(!getUser()) location.href='/login.html'; };
+export const logLine = async (username, line)=> api('/api/save-log', { method:'POST', body: JSON.stringify({ username, sessionId: sessionId(), line })});
+```
+
+## 5) `/public/js/theme.js`
+
+```js
+const apply = (t)=> document.documentElement.setAttribute('data-theme', t);
+const themes = ['neon','teal','rose','amber'];
+window.themes = themes;
+window.addEventListener('DOMContentLoaded', ()=>{
+  const saved = localStorage.getItem('theme') || 'neon';
+  apply(saved);
+  document.querySelectorAll('[data-theme-btn]').forEach((b)=>{
+    b.addEventListener('click', ()=>{ const t=b.dataset.themeBtn; localStorage.setItem('theme', t); apply(t); });
+  });
+});
+```
+
+## 6) `/public/js/auth.js`
+
+```js
+import { api, setUser } from './util.js';
+
+export async function register(ev){
+  ev.preventDefault();
+  const f = ev.target; const username=f.username.value.trim(); const password=f.password.value;
+  const r = await api('/api/register', { method:'POST', body: JSON.stringify({ username, password })});
+  alert('Registered: '+r.username); location.href='/login.html';
+}
+
+export async function login(ev){
+  ev.preventDefault();
+  const f = ev.target; const username=f.username.value.trim(); const password=f.password.value;
+  const r = await api('/api/login', { method:'POST', body: JSON.stringify({ username, password })});
+  localStorage.setItem('token', r.token); setUser(r.username); location.href='/dashboard.html';
+}
+```
+
+## 7) `/public/js/landing.js`
+
+```js
+import { api } from './util.js';
+
+async function setHeadline(){
+  try {
+    const r = await api('/api/gemini', { method:'POST', body: JSON.stringify({
+      system: 'You write ultra-short punchy product headlines for an AI assistant website. Max 8 words.',
+      prompt: 'Write 5 variations. Return just one randomly chosen line.'
+    })});
+    document.getElementById('headline').textContent = (r.text||'Smart, fast, friendly AI.').replace(/\n/g,' ').slice(0,100);
+  } catch(e){ document.getElementById('headline').textContent = 'Smart, fast, friendly AI.'; }
+}
+
+window.addEventListener('DOMContentLoaded', setHeadline);
+```
+
+## 8) `/public/js/chat.js`
+
+```js
+import { api, getUser, logLine, sessionId } from './util.js';
+
+const elChat = () => document.getElementById('chat');
+const add = (cls, text) => { const div=document.createElement('div'); div.className='message '+cls; div.textContent=text; elChat().appendChild(div); elChat().scrollTop = elChat().scrollHeight; };
+
+async function sendText(){
+  const user = getUser();
+  const input = document.getElementById('prompt');
+  const text = input.value.trim(); if(!text) return;
+  input.value=''; add('me', text); await logLine(user, `USER: ${text}`);
+  const r = await api('/api/gemini', { method:'POST', body: JSON.stringify({ prompt: text })});
+  add('ai', r.text); await logLine(user, `AI: ${r.text}`);
+}
+
+async function sendImage(){
+  const user = getUser();
+  const f = document.getElementById('image').files[0]; if(!f) return;
+  add('me', `[uploaded image: ${f.name}]`);
+  const fd = new FormData();
+  fd.append('image', f);
+  fd.append('prompt', document.getElementById('prompt').value || 'Analyze this image briefly.');
+  const r = await fetch('/api/gemini', { method:'POST', body: fd });
+  const data = await r.json();
+  add('ai', data.text || '[no response]');
+  await logLine(user, `IMG: ${f.name}`);
+  await logLine(user, `AI: ${data.text}`);
+}
+
+window.addEventListener('DOMContentLoaded', ()=>{
+  document.getElementById('send').addEventListener('click', sendText);
+  document.getElementById('analyze').addEventListener('click', sendImage);
+});
+```
